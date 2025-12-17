@@ -80,19 +80,22 @@ if 'sales_df' in st.session_state and st.session_state['sales_df'] is not None:
         # --- Top Summary Cards ---
         c1, c2, c3, c4, c5 = st.columns(5)
         
-        c1.metric("Gross Revenue", f"₹{overall_kpis['Gross_Revenue']:,.0f}")
-        c2.metric("Gross Margin", f"{min(overall_kpis['Blended_CM_Pct']*1.5, 0.7):.1%}") # Approximation if COGS missing, reusing calc
-        # Actually let's calculate real Gross Margin from merged_df
-        real_gm = merged_df['Gross_Profit'].sum() / merged_df['Revenue'].sum() if merged_df['Revenue'].sum() > 0 else 0
-        c2.metric("Gross Margin %", f"{real_gm:.1%}")
+        c1.metric("Net Revenue", f"₹{overall_kpis['Net_Revenue']:,.0f}", help=f"Gross: ₹{overall_kpis['Gross_Revenue']:,.0f}")
         
-        c3.metric("Contribution Margin (CM2)", f"{overall_kpis['Blended_CM_Pct']:.1%}", delta_color="normal")
+        # Real Gross Margin based on Net Revenue
+        real_gm = overall_kpis['Gross_Revenue'] - overall_kpis['Total_Spend'] # Placeholder logic if needed, but let's use the DF
+        # Actually overall_kpis has calculated Net Profit (Contribution 2). 
+        # Let's show Return Rate instead of generic GM here if space is tight, or stick to CM.
+        
+        c2.metric("Return Rate", f"{overall_kpis['Return_Rate']:.1%}", help="Percent of Orders Returned")
+        
+        c3.metric("Contribution Margin (CM2)", f"{overall_kpis['Blended_CM_Pct']:.1%}", delta_color="normal", help="Net Revenue - COGS - Logistics - Marketing")
         c4.metric("Blended CAC", f"₹{overall_kpis['Blended_CAC']:.0f}")
         c5.metric("Blended ROAS", f"{overall_kpis['Blended_ROAS']:.2f}x")
 
         # --- Unit Economics Health Score ---
-        # Very simple score: (CM% * 50) + (ROAS/4 * 30) + (10 if Net Profit > 0 else 0)
-        score = min(100, (overall_kpis['Blended_CM_Pct'] * 100 * 1.2) + (overall_kpis['Blended_ROAS'] * 5))
+        # Heuristic: (CM% * 60) + (ROAS * 10) - (Return Rate * 20)
+        score = min(100, max(0, (overall_kpis['Blended_CM_Pct'] * 100 * 1.5) + (overall_kpis['Blended_ROAS'] * 5) - (overall_kpis['Return_Rate']*100)))
         st.progress(min(score/100, 1.0), text=f"**Unit Economics Health Score: {int(score)}/100**")
         
         # --- Tabs ---
@@ -102,15 +105,15 @@ if 'sales_df' in st.session_state and st.session_state['sales_df'] is not None:
             st.subheader("Profitability Waterfall: Where is money going?")
             # Waterfall Calculation
             rev = overall_kpis['Gross_Revenue']
+            returns_val = -(overall_kpis['Gross_Revenue'] - overall_kpis['Net_Revenue'])
             cogs = -merged_df['Total_COGS'].sum()
             logistics_cost = -merged_df['Fulfillment_Cost'].sum()
             mkt_spend = -overall_kpis['Total_Spend']
-            net_cm = rev + cogs + logistics_cost + mkt_spend
             
             fig_waterfall = go.Figure(go.Waterfall(
-                measure = ["relative", "relative", "subtotal", "relative", "relative", "total"],
-                x = ["Gross Revenue", "COGS", "Gross Profit", "Fulfillment", "Marketing", "Contribution Profit"],
-                y = [rev, cogs, 0, logistics_cost, mkt_spend, 0],
+                measure = ["relative", "relative", "subtotal", "relative", "relative", "relative", "total"],
+                x = ["Gross Revenue", "Returns", "Net Sales", "COGS", "Fulfillment", "Marketing", "Contribution Profit"],
+                y = [rev, returns_val, 0, cogs, logistics_cost, mkt_spend, 0],
                 connector = {"line":{"color":"rgb(63, 63, 63)"}},
                 decreasing = {"marker":{"color":"#EF553B"}},
                 increasing = {"marker":{"color":"#00CC96"}},
@@ -144,28 +147,28 @@ if 'sales_df' in st.session_state and st.session_state['sales_df'] is not None:
                 st.plotly_chart(fig_scat, use_container_width=True)
                 
             st.dataframe(channel_metrics.style.format({
-                'Revenue': '₹{:,.0f}', 'Spend': '₹{:,.0f}', 'CAC': '₹{:.0f}', 
-                'ROAS': '{:.2f}x', 'CM_Pct': '{:.1%}', 'Gross_Margin_Pct': '{:.1%}'
+                'Revenue': '₹{:,.0f}', 'Net_Revenue': '₹{:,.0f}', 'Spend': '₹{:,.0f}', 'CAC': '₹{:.0f}', 
+                'ROAS': '{:.2f}x', 'CM_Pct': '{:.1%}', 'Gross_Margin_Pct': '{:.1%}', 'Return_Rate_Pct': '{:.1%}'
             }), use_container_width=True)
 
         with tab3:
             st.subheader("Top Performers & Bleeders")
             # Group by SKU
             sku_group = merged_df.groupby('SKU').agg({
-                'Revenue': 'sum',
+                'Net_Revenue': 'sum',
                 'Units_Sold': 'sum',
                 'Gross_Profit': 'sum',
                 'Contribution_Profit_1': 'sum' # Pre-marketing
             }).reset_index()
-            sku_group['Gross_Margin_%'] = sku_group['Gross_Profit'] / sku_group['Revenue']
+            sku_group['Gross_Margin_%'] = np.where(sku_group['Net_Revenue']>0, sku_group['Gross_Profit'] / sku_group['Net_Revenue'], 0)
             
             col_sku1, col_sku2 = st.columns(2)
             with col_sku1:
-                st.markdown("**Top 5 SKUs by Revenue**")
-                st.dataframe(sku_group.sort_values('Revenue', ascending=False).head(5).style.format({'Revenue': '₹{:,.0f}', 'Gross_Margin_%': '{:.1%}'}), hide_index=True)
+                st.markdown("**Top 5 SKUs by Net Revenue**")
+                st.dataframe(sku_group.sort_values('Net_Revenue', ascending=False).head(5).style.format({'Net_Revenue': '₹{:,.0f}', 'Gross_Margin_%': '{:.1%}'}), hide_index=True)
             with col_sku2:
                 st.markdown("**Bottom 5 SKUs by Margin %**")
-                st.dataframe(sku_group.sort_values('Gross_Margin_%', ascending=True).head(5).style.format({'Revenue': '₹{:,.0f}', 'Gross_Margin_%': '{:.1%}'}), hide_index=True)
+                st.dataframe(sku_group.sort_values('Gross_Margin_%', ascending=True).head(5).style.format({'Net_Revenue': '₹{:,.0f}', 'Gross_Margin_%': '{:.1%}'}), hide_index=True)
 
         # --- Upsell / Footer ---
         st.markdown("<div class='upsell-box'>", unsafe_allow_html=True)
@@ -184,23 +187,37 @@ if 'sales_df' in st.session_state and st.session_state['sales_df'] is not None:
         st.markdown("### 📥 Export Analysis")
         from utils import reporting
         
-        # Generate HTML report on button click context (actually pre-generate for download button)
-        report_html = reporting.generate_html_report(
-            overall_kpis, 
-            channel_metrics, 
-            fig_waterfall, 
-            fig_trend, 
-            fig_bar, 
-            fig_scat
-        )
+        col_export1, col_export2 = st.columns(2)
         
-        st.download_button(
-            label="📄 Download Full Report (HTML/PDF Ready)",
-            data=report_html,
-            file_name="Mahanka_Unit_Economics_Report.html",
-            mime="text/html",
-            help="Downloads an interactive HTML file. You can Print > Save as PDF from your browser."
-        )
+        with col_export1:
+            # Generate HTML report
+            report_html = reporting.generate_html_report(
+                overall_kpis, 
+                channel_metrics, 
+                fig_waterfall, 
+                fig_trend, 
+                fig_bar, 
+                fig_scat
+            )
+            st.download_button(
+                label="📄 Download Full Report (HTML/PDF)",
+                data=report_html,
+                file_name="Mahanka_Unit_Economics_Report.html",
+                mime="text/html",
+                use_container_width=True
+            )
+            
+        with col_export2:
+            # CSV Download
+            csv_data = merged_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📊 Download Detailed Data (CSV)",
+                data=csv_data,
+                file_name="Mahanka_Processed_Data.csv",
+                mime="text/csv",
+                use_container_width=True,
+                help="Export the row-level data with calculated COGS, Logistics, and Net Revenue."
+            )
 
     except Exception as e:
         st.error(f"Error processing data: {str(e)}")

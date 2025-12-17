@@ -63,20 +63,27 @@ def generate_sample_data():
             })
     marketing_df = pd.DataFrame(marketing_records)
 
-    # 4. Logistics/Other (Order Level)
-    # Generate logistics for existing orders
+    # 4. Logistics/Other (Order Level) with RETURNS
     logistics_records = []
-    for order_id in sales_df['Order_ID'].unique():
+    for _, row in sales_df.iterrows():
+        order_id = row['Order_ID']
+        channel = row['Channel']
+        
         # Random logic: Amazon FBA vs Self Ship
         shipping = np.random.choice([60, 80, 120])
-        returns = 0
-        if np.random.random() < 0.15: # 15% return rate
-            returns = 1
+        
+        # Returns Logic (Higher returns for marketplaces)
+        return_prob = 0.15 # Base
+        if channel == 'Myntra': return_prob = 0.30
+        if channel == 'Amazon': return_prob = 0.25
+        
+        is_return = 1 if np.random.random() < return_prob else 0
         
         logistics_records.append({
             'Order_ID': order_id,
             'Fulfillment_Cost': shipping,
-            'Is_Return': returns
+            'Is_Return': is_return,
+            'Return_Reason': np.random.choice(['Size', 'Quality', 'Changed Mind']) if is_return else None
         })
     logistics_df = pd.DataFrame(logistics_records)
     
@@ -100,10 +107,11 @@ def process_data(sales, inventory, marketing, logistics):
     Core logic to merge and calculate unit economics.
     Returns:
         - merged_df: Granular Sales + COGS + Logistics
-        - channel_metrics: Agreggated by Channel/Month with Marketing info
+        - channel_metrics: Aggregated by Channel/Month with Marketing info
         - overall_metrics: Dictionary of scalar KPIs
     """
     # 1. Pre-process Sales
+    sales = sales.copy()
     sales['Order_Date'] = pd.to_datetime(sales['Order_Date'])
     sales['Month'] = sales['Order_Date'].dt.to_period('M').dt.to_timestamp()
     
@@ -120,46 +128,55 @@ def process_data(sales, inventory, marketing, logistics):
         # Fallback if no match
         merged_df['Total_COGS'] = 0
         
-    merged_df['Gross_Profit'] = merged_df['Revenue'] - merged_df['Total_COGS']
+    merged_df['Gross_Sales_Value'] = merged_df['Revenue'] # Preserve original as Gross
     
-    # 3. Merge Logistics (Variable Costs)
+    # 3. Merge Logistics and Handle RETURNS
     if logistics is not None:
-        # Try merging on Order_ID
         if 'Order_ID' in logistics.columns and 'Order_ID' in merged_df.columns:
             merged_df = pd.merge(merged_df, logistics, on='Order_ID', how='left')
             merged_df['Fulfillment_Cost'] = merged_df['Fulfillment_Cost'].fillna(0)
             
-            # Handle RTO/Returns if column exists
-            # Convention: If Is_Return is 1, maybe Revenue is lost? 
-            # For simplicity, we'll just treat fulfillment cost as a sunk cost for now.
-            # And usually returns imply negative revenue, but let's assume 'Revenue' in input is Net Sales for MVP simplicity 
-            # OR we subtract returns from revenue.
-            # Let's subtract return revenue if 'Is_Return' exists
-            if 'Is_Return' in merged_df.columns:
-                 # If returned, revenue becomes 0 (simplified) or negative. 
-                 # Let's just track it as a cost 'Return_Cost' or deduced from Gross.
-                 # Actually, usually 'Revenue' input is Gross Sales. 
-                 # We will calculate Net Revenue = Revenue * (1 - Return Rate). 
-                 # But sticking to exact data:
-                 pass
+            # Normalize Return Columns
+            if 'Is_Return' not in merged_df.columns:
+                # check for alternate names or derive
+                if 'Return_Status' in merged_df.columns:
+                     merged_df['Is_Return'] = merged_df['Return_Status'].apply(lambda x: 1 if str(x).lower() in ['returned', 'rto', 'return'] else 0)
+                else:
+                     merged_df['Is_Return'] = 0
+            
+            merged_df['Is_Return'] = merged_df['Is_Return'].fillna(0).astype(int)
+            
         else:
             merged_df['Fulfillment_Cost'] = 0
+            merged_df['Is_Return'] = 0
     else:
         merged_df['Fulfillment_Cost'] = 0
+        merged_df['Is_Return'] = 0
         
-    # Calculate Contribution Margin 1 (Product + Fulfillment)
+    # --- NET REVENUE CALCULATION ---
+    # Net Revenue = Revenue * (1 - Is_Return) -> Assuming full refund
+    # Also handle negative revenue inputs if any
+    merged_df['Net_Revenue'] = np.where(merged_df['Is_Return'] == 1, 0, merged_df['Revenue'])
+    
+    # Gross Profit (Net) = Net_Revenue - COGS (Sunk)
+    # Note: User requested COGS is sunk even on returns. 
+    merged_df['Gross_Profit'] = merged_df['Net_Revenue'] - merged_df['Total_COGS']
+    
+    # Contribution Margin 1 (Net) = Gross Profit - Fulfillment (Sunk)
     merged_df['Contribution_Profit_1'] = merged_df['Gross_Profit'] - merged_df['Fulfillment_Cost']
     
     # 4. Aggregations for Marketing (CM2)
     # Group by Channel and Month
     channel_group = merged_df.groupby(['Channel', 'Month']).agg({
-        'Revenue': 'sum',
+        'Revenue': 'sum', # Gross Revenue
+        'Net_Revenue': 'sum',
         'Total_COGS': 'sum',
         'Fulfillment_Cost': 'sum',
         'Contribution_Profit_1': 'sum',
         'Units_Sold': 'sum',
-        'Order_ID': 'nunique' # Order Count
-    }).reset_index()
+        'Order_ID': 'nunique',
+        'Is_Return': 'sum'
+    }).rename(columns={'Is_Return': 'Return_Count'}).reset_index()
     
     # 5. Merge Marketing Spend
     if marketing is not None:
@@ -179,28 +196,39 @@ def process_data(sales, inventory, marketing, logistics):
     
     # KPIs
     channel_metrics['CAC'] = np.where(channel_metrics['Order_ID'] > 0, channel_metrics['Spend'] / channel_metrics['Order_ID'], 0)
-    # Note: CAC is ideally Spend / New Customers. Using Total Orders as proxy if Customer info missing.
-    # We can refine if we have customer ID later.
     
+    # ROAS calculated on Gross Revenue usually, but can be Net. Standard is Gross Sales / Spend.
     channel_metrics['ROAS'] = np.where(channel_metrics['Spend'] > 0, channel_metrics['Revenue'] / channel_metrics['Spend'], 0)
+    
     channel_metrics['AOV'] = np.where(channel_metrics['Order_ID'] > 0, channel_metrics['Revenue'] / channel_metrics['Order_ID'], 0)
-    channel_metrics['Gross_Margin_Pct'] = np.where(channel_metrics['Revenue'] > 0, (channel_metrics['Revenue'] - channel_metrics['Total_COGS']) / channel_metrics['Revenue'], 0)
-    channel_metrics['CM_Pct'] = np.where(channel_metrics['Revenue'] > 0, channel_metrics['Contribution_Profit_2'] / channel_metrics['Revenue'], 0)
+    
+    # Margins based on Net Revenue ideally, but often denomination is Gross. 
+    # Let's use Net Revenue denomiator for "Real" margin, or Gross for standard accounting?
+    # User asked for "True Profitability". 
+    # CM % = Contribution Profit / Net Revenue is most accurate.
+    # However, to avoid Div/0 if Net Rev is 0 (all returns), we handle carefully.
+    channel_metrics['CM_Pct'] = np.where(channel_metrics['Net_Revenue'] > 0, channel_metrics['Contribution_Profit_2'] / channel_metrics['Net_Revenue'], 0)
+    
+    # Return Rate
+    channel_metrics['Return_Rate_Pct'] = np.where(channel_metrics['Order_ID'] > 0, channel_metrics['Return_Count'] / channel_metrics['Order_ID'], 0)
     
     # 7. Overall Summary
-    total_rev = channel_metrics['Revenue'].sum()
+    gross_rev = channel_metrics['Revenue'].sum()
+    net_rev = channel_metrics['Net_Revenue'].sum()
     total_spend = channel_metrics['Spend'].sum()
     total_orders = channel_metrics['Order_ID'].sum()
     total_margin = channel_metrics['Contribution_Profit_2'].sum()
     
     overall = {
-        'Gross_Revenue': total_rev,
+        'Gross_Revenue': gross_rev,
+        'Net_Revenue': net_rev,
         'Total_Spend': total_spend,
         'Total_Orders': total_orders,
         'Net_Profit': total_margin, # Pre-fixed costs
-        'Blended_ROAS': total_rev / total_spend if total_spend > 0 else 0,
+        'Blended_ROAS': gross_rev / total_spend if total_spend > 0 else 0,
         'Blended_CAC': total_spend / total_orders if total_orders > 0 else 0,
-        'Blended_CM_Pct': total_margin / total_rev if total_rev > 0 else 0
+        'Blended_CM_Pct': total_margin / net_rev if net_rev > 0 else 0,
+        'Return_Rate': channel_metrics['Return_Count'].sum() / total_orders if total_orders > 0 else 0
     }
     
     return merged_df, channel_metrics, overall
@@ -208,29 +236,23 @@ def process_data(sales, inventory, marketing, logistics):
 def calculate_ltv(merged_df):
     """
     Simple LTV calculation.
-    If Customer_ID exists: LTV = Avg Revenue per Customer * Gross Margin Avg
     """
     if 'Customer_ID' not in merged_df.columns:
-        return 0, 0 # Can't calc LTV without Customer ID
+        return 0, 0 
         
-    # Group by Customer
+    # Group by Customer (Use Net Revenue)
     cust_group = merged_df.groupby('Customer_ID').agg({
-        'Revenue': 'sum',
-        'Gross_Profit': 'sum',
+        'Net_Revenue': 'sum',
+        'Contribution_Profit_1': 'sum', # Gross Profit post-fulfillment
         'Order_ID': 'nunique'
     })
     
-    avg_customer_revenue = cust_group['Revenue'].mean()
-    avg_customer_profit = cust_group['Gross_Profit'].mean()
-    avg_orders_per_cust = cust_group['Order_ID'].mean()
+    avg_customer_revenue = cust_group['Net_Revenue'].mean()
+    avg_customer_profit = cust_group['Contribution_Profit_1'].mean()
     
     return avg_customer_revenue, avg_customer_profit
 
 def calculate_payback(cac, margin_per_order, orders_per_month_per_cust=1):
-    """
-    Simple Payback Period in Months.
-    Payback = CAC / (Margin/Month)
-    Margin/Month = Margin/Order * Frequency
-    """
-    if margin_per_order <= 0: return 999 # Never breaks even
+    if margin_per_order <= 0: return 999
     return cac / margin_per_order
+
