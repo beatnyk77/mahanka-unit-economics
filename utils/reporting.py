@@ -45,6 +45,14 @@ def generate_html_report(overall_kpis, channel_metrics_df, fig_waterfall, fig_tr
                 <div class="metric-label">Gross Revenue</div>
             </div>
             <div class="metric-box">
+                <div class="metric-value">₹{overall_kpis['Net_Revenue']:,.0f}</div>
+                <div class="metric-label">Net Revenue</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{overall_kpis['Return_Rate']:.1%}</div>
+                <div class="metric-label">Return Rate</div>
+            </div>
+            <div class="metric-box">
                 <div class="metric-value">{overall_kpis['Blended_CM_Pct']:.1%}</div>
                 <div class="metric-label">Contribution Margin</div>
             </div>
