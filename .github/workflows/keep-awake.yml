@@ -1,0 +1,11 @@
+name: Keep Streamlit Awake
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # Every 10 minutes
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping App
+        run: curl -s mahanka-unit-economics-xdgepd9xd8kmxz6avpxmz3.streamlit.app/
