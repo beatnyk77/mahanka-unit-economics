@@ -8,4 +8,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping App
-        run: curl -s mahanka-unit-economics-xdgepd9xd8kmxz6avpxmz3.streamlit.app/
+        run: curl -s https://mahanka-unit-economics-xdgepd9xd8kmxz6avpxmz3.streamlit.app/
